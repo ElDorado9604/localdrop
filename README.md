@@ -1,28 +1,31 @@
-# Local Drop
+# LocalDrop
 
-Peer-to-peer local file transfer over WebRTC. Share files instantly between devices on the same network — no cloud, no accounts.
+**Send files directly on the same Wi‑Fi or hotspot.**
+
+Peer-to-peer local file transfer over WebRTC. No accounts, no cloud, no transfer history. File bytes never touch the server.
 
 ## Features
 
-- **Local-first**: Devices discover each other via a lightweight signaling server
-- **WebRTC data channels**: Direct peer-to-peer file transfer
-- **QR / Pairing code**: Easy device pairing
-- **Multi-file queue**: Select multiple files and track progress
-- **Device names**: Friendly names for connected devices
+- Local-only WebRTC (`iceServers: []` — host candidates only, no STUN/TURN)
+- QR code + 6-digit pairing code
+- Multi-file queue with progress, speed, and ETA
+- Mobile-first PWA (installable)
+- Dark mode by default, optional light mode
+- Temporary in-memory rooms (auto-expire after 5 minutes if unused)
 
-## Monorepo Structure
+## Architecture
 
-```
-localdrop/
-├── frontend/     # React + Vite + Tailwind + TypeScript
-├── backend/      # Node.js + Socket.IO signaling server
-├── README.md
-└── .gitignore
-```
+| Layer    | Stack                                      | Hosting   |
+|----------|--------------------------------------------|-----------|
+| Frontend | React 18, Vite, Tailwind, TypeScript, PWA  | Vercel    |
+| Backend  | Node.js, Express, Socket.IO, TypeScript    | Render    |
+| Transfer | WebRTC RTCDataChannel (chunked, backpressure) | Device-to-device |
 
-## Quick Start
+The backend is **signaling only**. It never receives, stores, or proxies file bytes.
 
-### Backend
+## Quick start
+
+### Backend (signaling)
 
 ```bash
 cd backend
@@ -30,7 +33,7 @@ npm install
 npm run dev
 ```
 
-Server runs on `http://localhost:3001` by default.
+Listens on `http://localhost:3001`.
 
 ### Frontend
 
@@ -40,24 +43,28 @@ npm install
 npm run dev
 ```
 
-App runs on `http://localhost:5173`.
+Opens `http://localhost:5173`. Vite proxies Socket.IO to the backend.
 
-Set `VITE_SOCKET_URL` if the signaling server is not on the same origin.
+Set `VITE_SOCKET_URL` to your Render signaling URL in production.
 
 ## How it works
 
-1. Devices connect to the signaling server and join a room (via pairing code or QR).
-2. Signaling exchanges SDP offers/answers and ICE candidates.
-3. A WebRTC data channel is established for direct file transfer.
-4. Files are chunked and sent over the data channel with progress reporting.
+1. Sender creates a temporary room → gets a 6-digit code + QR.
+2. Receiver joins via QR or code (same Wi‑Fi / hotspot required).
+3. WebRTC negotiates a **local host-to-host** data channel.
+4. Files are chunked (64 KB) with backpressure and sent peer-to-peer.
+5. Room is destroyed on complete, cancel, disconnect, or expiry.
 
-## Tech Stack
+## Supported scenarios
 
-| Layer    | Stack                                      |
-|----------|--------------------------------------------|
-| Frontend | React 18, Vite, Tailwind CSS, TypeScript   |
-| Backend  | Node.js, Express, Socket.IO, TypeScript    |
-| P2P      | WebRTC DataChannels                        |
+- Same home/office Wi‑Fi (phone ↔ laptop, etc.)
+- Personal hotspot (iPhone/Android hotspot → other devices)
+- ChromeOS, Windows, macOS, iOS Safari, Android Chrome
+
+## Deploy
+
+- **Frontend (Vercel):** connect the `frontend` directory; set `VITE_SOCKET_URL`.
+- **Backend (Render):** Docker web service from `backend/Dockerfile`; set `CORS_ORIGIN` to your Vercel URL.
 
 ## License
 
