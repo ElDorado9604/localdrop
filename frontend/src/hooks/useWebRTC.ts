@@ -1,180 +1,165 @@
 import { useRef, useCallback, useState } from "react";
 import {
-  createPeerConnection,
+  createLocalPeerConnection,
   createDataChannel,
-  type DataChannelMessage,
-  encodeMessage,
-  decodeMessage,
+  assertLocalCandidatePair,
 } from "../lib/webrtc";
-import type { PeerConnectionState } from "../types/transfer";
 
-interface PeerSession {
-  pc: RTCPeerConnection;
-  channel: RTCDataChannel | null;
-  remoteDeviceId: string;
-  isInitiator: boolean;
-}
+type SignalSend = (
+  type: "offer" | "answer" | "ice-candidate",
+  payload: RTCSessionDescriptionInit | RTCIceCandidateInit
+) => void;
 
 interface UseWebRTCOptions {
-  sendSignal: (
-    type: "offer" | "answer" | "ice-candidate",
-    to: string,
-    payload: RTCSessionDescriptionInit | RTCIceCandidateInit
-  ) => void;
-  onMessage?: (from: string, msg: DataChannelMessage) => void;
-  onPeerStateChange?: (deviceId: string, state: PeerConnectionState) => void;
+  sendSignal: SignalSend;
+  onChannelOpen?: (channel: RTCDataChannel) => void;
+  onChannelMessage?: (data: ArrayBuffer | string) => void;
+  onChannelClose?: () => void;
+  onLocalCheckFailed?: () => void;
+  onConnectionFailed?: (reason: string) => void;
 }
 
 export function useWebRTC(options: UseWebRTCOptions) {
-  const peersRef = useRef<Map<string, PeerSession>>(new Map());
-  const [peerStates, setPeerStates] = useState<Record<string, PeerConnectionState>>({});
+  const pcRef = useRef<RTCPeerConnection | null>(null);
+  const channelRef = useRef<RTCDataChannel | null>(null);
   const optionsRef = useRef(options);
   optionsRef.current = options;
+  const [pcState, setPcState] = useState<RTCPeerConnectionState>("new");
+  const pendingIce = useRef<RTCIceCandidateInit[]>([]);
+  const remoteSet = useRef(false);
 
-  const updateState = useCallback((deviceId: string, state: PeerConnectionState) => {
-    setPeerStates((prev) => ({ ...prev, [deviceId]: state }));
-    optionsRef.current.onPeerStateChange?.(deviceId, state);
-  }, []);
-
-  const setupChannel = useCallback((deviceId: string, channel: RTCDataChannel) => {
+  const wireChannel = useCallback((channel: RTCDataChannel) => {
     channel.binaryType = "arraybuffer";
+    channelRef.current = channel;
 
     channel.onopen = () => {
-      updateState(deviceId, "connected");
+      optionsRef.current.onChannelOpen?.(channel);
     };
-
     channel.onclose = () => {
-      updateState(deviceId, "closed");
+      optionsRef.current.onChannelClose?.();
     };
-
     channel.onerror = () => {
-      updateState(deviceId, "failed");
+      optionsRef.current.onConnectionFailed?.("Data channel error");
     };
-
     channel.onmessage = (event) => {
-      const msg = decodeMessage(event.data);
-      if (msg) {
-        optionsRef.current.onMessage?.(deviceId, msg);
-      }
+      optionsRef.current.onChannelMessage?.(event.data);
     };
-  }, [updateState]);
+  }, []);
 
-  const ensurePeer = useCallback(
-    (remoteDeviceId: string, isInitiator: boolean): PeerSession => {
-      let session = peersRef.current.get(remoteDeviceId);
-      if (session) return session;
+  const ensurePc = useCallback(
+    (asInitiator: boolean): RTCPeerConnection => {
+      if (pcRef.current) return pcRef.current;
 
-      const pc = createPeerConnection(
+      const pc = createLocalPeerConnection(
         (candidate) => {
-          optionsRef.current.sendSignal("ice-candidate", remoteDeviceId, candidate.toJSON());
+          optionsRef.current.sendSignal("ice-candidate", candidate.toJSON());
         },
-        (state) => {
-          updateState(remoteDeviceId, state as PeerConnectionState);
+        async (state) => {
+          setPcState(state);
+          if (state === "connected") {
+            const ok = await assertLocalCandidatePair(pc);
+            if (!ok) {
+              optionsRef.current.onLocalCheckFailed?.();
+              pc.close();
+            }
+          }
+          if (state === "failed") {
+            optionsRef.current.onConnectionFailed?.(
+              "Local connection could not be established. Confirm that both devices are connected to the same Wi-Fi network or hotspot, then try again."
+            );
+          }
         }
       );
 
-      let channel: RTCDataChannel | null = null;
-
-      if (isInitiator) {
-        channel = createDataChannel(pc);
-        setupChannel(remoteDeviceId, channel);
+      if (asInitiator) {
+        const channel = createDataChannel(pc);
+        wireChannel(channel);
       } else {
         pc.ondatachannel = (event) => {
-          channel = event.channel;
-          const s = peersRef.current.get(remoteDeviceId);
-          if (s) s.channel = channel;
-          setupChannel(remoteDeviceId, channel);
+          wireChannel(event.channel);
         };
       }
 
-      session = { pc, channel, remoteDeviceId, isInitiator };
-      peersRef.current.set(remoteDeviceId, session);
-      updateState(remoteDeviceId, "connecting");
-      return session;
+      pcRef.current = pc;
+      return pc;
     },
-    [setupChannel, updateState]
+    [wireChannel]
   );
 
-  const createOffer = useCallback(
-    async (remoteDeviceId: string) => {
-      const session = ensurePeer(remoteDeviceId, true);
-      const offer = await session.pc.createOffer();
-      await session.pc.setLocalDescription(offer);
-      optionsRef.current.sendSignal("offer", remoteDeviceId, offer);
-    },
-    [ensurePeer]
-  );
+  const createOffer = useCallback(async () => {
+    const pc = ensurePc(true);
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    optionsRef.current.sendSignal("offer", offer);
+  }, [ensurePc]);
 
   const handleOffer = useCallback(
-    async (from: string, sdp: RTCSessionDescriptionInit) => {
-      const session = ensurePeer(from, false);
-      await session.pc.setRemoteDescription(new RTCSessionDescription(sdp));
-      const answer = await session.pc.createAnswer();
-      await session.pc.setLocalDescription(answer);
-      optionsRef.current.sendSignal("answer", from, answer);
+    async (sdp: RTCSessionDescriptionInit) => {
+      const pc = ensurePc(false);
+      await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+      remoteSet.current = true;
+      for (const c of pendingIce.current) {
+        try {
+          await pc.addIceCandidate(new RTCIceCandidate(c));
+        } catch {
+          /* ignore */
+        }
+      }
+      pendingIce.current = [];
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      optionsRef.current.sendSignal("answer", answer);
     },
-    [ensurePeer]
+    [ensurePc]
   );
 
-  const handleAnswer = useCallback(async (from: string, sdp: RTCSessionDescriptionInit) => {
-    const session = peersRef.current.get(from);
-    if (!session) return;
-    await session.pc.setRemoteDescription(new RTCSessionDescription(sdp));
+  const handleAnswer = useCallback(async (sdp: RTCSessionDescriptionInit) => {
+    const pc = pcRef.current;
+    if (!pc) return;
+    await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+    remoteSet.current = true;
+    for (const c of pendingIce.current) {
+      try {
+        await pc.addIceCandidate(new RTCIceCandidate(c));
+      } catch {
+        /* ignore */
+      }
+    }
+    pendingIce.current = [];
   }, []);
 
-  const handleIceCandidate = useCallback(async (from: string, candidate: RTCIceCandidateInit) => {
-    const session = peersRef.current.get(from);
-    if (!session) return;
+  const handleIce = useCallback(async (candidate: RTCIceCandidateInit) => {
+    const pc = pcRef.current;
+    if (!pc || !remoteSet.current) {
+      pendingIce.current.push(candidate);
+      return;
+    }
     try {
-      await session.pc.addIceCandidate(new RTCIceCandidate(candidate));
-    } catch (err) {
-      console.warn("Failed to add ICE candidate", err);
+      await pc.addIceCandidate(new RTCIceCandidate(candidate));
+    } catch {
+      /* ignore */
     }
   }, []);
 
-  const sendMessage = useCallback((deviceId: string, msg: DataChannelMessage): boolean => {
-    const session = peersRef.current.get(deviceId);
-    if (!session?.channel || session.channel.readyState !== "open") {
-      return false;
-    }
-    const encoded = encodeMessage(msg);
-    session.channel.send(encoded as ArrayBuffer);
-    return true;
-  }, []);
+  const getChannel = useCallback(() => channelRef.current, []);
 
-  const closePeer = useCallback((deviceId: string) => {
-    const session = peersRef.current.get(deviceId);
-    if (!session) return;
-    session.channel?.close();
-    session.pc.close();
-    peersRef.current.delete(deviceId);
-    setPeerStates((prev) => {
-      const next = { ...prev };
-      delete next[deviceId];
-      return next;
-    });
-  }, []);
-
-  const closeAll = useCallback(() => {
-    for (const id of [...peersRef.current.keys()]) {
-      closePeer(id);
-    }
-  }, [closePeer]);
-
-  const getChannel = useCallback((deviceId: string): RTCDataChannel | null => {
-    return peersRef.current.get(deviceId)?.channel ?? null;
+  const close = useCallback(() => {
+    channelRef.current?.close();
+    pcRef.current?.close();
+    channelRef.current = null;
+    pcRef.current = null;
+    pendingIce.current = [];
+    remoteSet.current = false;
+    setPcState("closed");
   }, []);
 
   return {
-    peerStates,
+    pcState,
     createOffer,
     handleOffer,
     handleAnswer,
-    handleIceCandidate,
-    sendMessage,
-    closePeer,
-    closeAll,
+    handleIce,
     getChannel,
-    ensurePeer,
+    close,
   };
 }
