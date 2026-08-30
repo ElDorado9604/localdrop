@@ -1,26 +1,35 @@
-/** Default ICE servers — public STUN only (works well on LAN; TURN optional for hard NATs) */
-export const DEFAULT_ICE_SERVERS: RTCIceServer[] = [
-  { urls: "stun:stun.l.google.com:19302" },
-  { urls: "stun:stun1.l.google.com:19302" },
-];
+/**
+ * Local-only WebRTC: no STUN, no TURN, host candidates only.
+ * File bytes never leave the LAN / hotspot.
+ */
 
-export const CHUNK_SIZE = 64 * 1024; // 64 KB
+export const CHUNK_SIZE = 64 * 1024;
+export const BUFFERED_LOW_THRESHOLD = 256 * 1024;
 
-export type DataChannelMessage =
-  | { type: "file-start"; fileId: string; name: string; size: number; mime: string }
-  | { type: "file-chunk"; fileId: string; index: number; data: ArrayBuffer }
-  | { type: "file-end"; fileId: string }
-  | { type: "file-ack"; fileId: string; index: number }
-  | { type: "cancel"; fileId: string };
+export const LOCAL_ICE_CONFIG: RTCConfiguration = {
+  iceServers: [],
+  iceTransportPolicy: "all",
+};
 
-export function createPeerConnection(
+function isHostCandidate(candidate: RTCIceCandidate): boolean {
+  if (candidate.type === "host") return true;
+  const s = candidate.candidate || "";
+  if (s.includes(" typ host")) return true;
+  if (s.includes(" typ relay") || s.includes(" typ srflx")) return false;
+  if (!s.includes(" typ ")) return true;
+  return false;
+}
+
+export function createLocalPeerConnection(
   onIceCandidate: (candidate: RTCIceCandidate) => void,
-  onConnectionStateChange: (state: RTCPeerConnectionState) => void
+  onConnectionStateChange: (state: RTCPeerConnectionState) => void,
+  onIceConnectionStateChange?: (state: RTCIceConnectionState) => void
 ): RTCPeerConnection {
-  const pc = new RTCPeerConnection({ iceServers: DEFAULT_ICE_SERVERS });
+  const pc = new RTCPeerConnection(LOCAL_ICE_CONFIG);
 
   pc.onicecandidate = (event) => {
-    if (event.candidate) {
+    if (!event.candidate) return;
+    if (isHostCandidate(event.candidate)) {
       onIceCandidate(event.candidate);
     }
   };
@@ -29,18 +38,70 @@ export function createPeerConnection(
     onConnectionStateChange(pc.connectionState);
   };
 
+  if (onIceConnectionStateChange) {
+    pc.oniceconnectionstatechange = () => {
+      onIceConnectionStateChange(pc.iceConnectionState);
+    };
+  }
+
   return pc;
 }
 
-export function createDataChannel(pc: RTCPeerConnection, label = "localdrop"): RTCDataChannel {
-  const channel = pc.createDataChannel(label, {
-    ordered: true,
-  });
+export function createDataChannel(pc: RTCPeerConnection): RTCDataChannel {
+  const channel = pc.createDataChannel("localdrop", { ordered: true });
   channel.binaryType = "arraybuffer";
+  channel.bufferedAmountLowThreshold = BUFFERED_LOW_THRESHOLD;
   return channel;
 }
 
-/** Split a File into ArrayBuffer chunks */
+export async function assertLocalCandidatePair(pc: RTCPeerConnection): Promise<boolean> {
+  try {
+    const stats = await pc.getStats();
+    let selectedPairId: string | null = null;
+    const pairs = new Map<string, RTCStats>();
+    const locals = new Map<string, RTCStats>();
+    const remotes = new Map<string, RTCStats>();
+
+    stats.forEach((report) => {
+      if (report.type === "transport") {
+        const t = report as RTCTransportStats & { selectedCandidatePairId?: string };
+        if (t.selectedCandidatePairId) selectedPairId = t.selectedCandidatePairId;
+      }
+      if (report.type === "candidate-pair") {
+        pairs.set(report.id, report);
+        const p = report as RTCIceCandidatePairStats;
+        if (p.selected) selectedPairId = report.id;
+      }
+      if (report.type === "local-candidate") locals.set(report.id, report);
+      if (report.type === "remote-candidate") remotes.set(report.id, report);
+    });
+
+    if (!selectedPairId) {
+      for (const [id, report] of pairs) {
+        if ((report as RTCIceCandidatePairStats).state === "succeeded") {
+          selectedPairId = id;
+          break;
+        }
+      }
+    }
+
+    if (!selectedPairId) return false;
+    const pair = pairs.get(selectedPairId) as RTCIceCandidatePairStats | undefined;
+    if (!pair) return false;
+
+    const local = locals.get(pair.localCandidateId) as RTCIceCandidateStats | undefined;
+    const remote = remotes.get(pair.remoteCandidateId) as RTCIceCandidateStats | undefined;
+    if (!local || !remote) return false;
+
+    if (local.candidateType && local.candidateType !== "host") return false;
+    if (remote.candidateType && remote.candidateType !== "host") return false;
+
+    return true;
+  } catch {
+    return true;
+  }
+}
+
 export async function* chunkFile(
   file: File,
   chunkSize = CHUNK_SIZE
@@ -58,48 +119,19 @@ export async function* chunkFile(
   }
 }
 
-export function encodeMessage(msg: DataChannelMessage): string | ArrayBuffer {
-  if (msg.type === "file-chunk") {
-    // Binary frame: [1 byte type=1][2 bytes fileId len][fileId utf8][4 bytes index][payload]
-    const idBytes = new TextEncoder().encode(msg.fileId);
-    const header = new ArrayBuffer(1 + 2 + idBytes.length + 4);
-    const view = new DataView(header);
-    view.setUint8(0, 1); // type = chunk
-    view.setUint16(1, idBytes.length);
-    new Uint8Array(header, 3, idBytes.length).set(idBytes);
-    view.setUint32(3 + idBytes.length, msg.index);
-    const combined = new Uint8Array(header.byteLength + msg.data.byteLength);
-    combined.set(new Uint8Array(header), 0);
-    combined.set(new Uint8Array(msg.data), header.byteLength);
-    return combined.buffer;
+export function waitForBuffer(channel: RTCDataChannel): Promise<void> {
+  if (channel.bufferedAmount <= BUFFERED_LOW_THRESHOLD) {
+    return Promise.resolve();
   }
-
-  return JSON.stringify(msg);
+  return new Promise((resolve) => {
+    const onLow = () => {
+      channel.removeEventListener("bufferedamountlow", onLow);
+      resolve();
+    };
+    channel.addEventListener("bufferedamountlow", onLow);
+  });
 }
 
-export function decodeMessage(data: string | ArrayBuffer): DataChannelMessage | null {
-  if (typeof data === "string") {
-    try {
-      return JSON.parse(data) as DataChannelMessage;
-    } catch {
-      return null;
-    }
-  }
-
-  const view = new DataView(data);
-  const typeByte = view.getUint8(0);
-  if (typeByte !== 1) return null;
-
-  const idLen = view.getUint16(1);
-  const idBytes = new Uint8Array(data, 3, idLen);
-  const fileId = new TextDecoder().decode(idBytes);
-  const index = view.getUint32(3 + idLen);
-  const payload = data.slice(3 + idLen + 4);
-
-  return {
-    type: "file-chunk",
-    fileId,
-    index,
-    data: payload,
-  };
+export function supportsWebRTC(): boolean {
+  return typeof RTCPeerConnection !== "undefined" && typeof RTCSessionDescription !== "undefined";
 }
