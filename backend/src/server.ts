@@ -23,8 +23,11 @@ app.get("/health", (_req, res) => {
   res.json({ status: "ok", service: "localdrop-signaling" });
 });
 
-app.get("/stats", (_req, res) => {
-  res.json(roomManager.stats());
+app.get("/", (_req, res) => {
+  res.json({
+    name: "LocalDrop Signaling",
+    description: "Temporary WebRTC signaling only. File bytes never touch this server.",
+  });
 });
 
 const httpServer = createServer(app);
@@ -45,5 +48,5 @@ registerSocketHandlers(io, roomManager);
 startCleanupScheduler(roomManager);
 
 httpServer.listen(PORT, () => {
-  console.log(`Local Drop signaling server listening on :${PORT}`);
+  console.log(`LocalDrop signaling listening on :${PORT}`);
 });
