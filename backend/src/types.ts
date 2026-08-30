@@ -1,49 +1,54 @@
-export interface DeviceInfo {
-  id: string;
-  name: string;
-  socketId: string;
-  joinedAt: number;
-}
+export type RoomStatus = "waiting" | "paired" | "transferring" | "completed" | "cancelled";
 
-export interface Room {
-  id: string;
-  code: string;
-  devices: Map<string, DeviceInfo>;
+export interface TransferRoom {
+  roomId: string;
+  pairingCode: string;
   createdAt: number;
-  lastActivity: number;
+  expiresAt: number;
+  senderSocketId?: string;
+  receiverSocketId?: string;
+  senderName?: string;
+  receiverName?: string;
+  status: RoomStatus;
 }
 
 export interface ServerToClientEvents {
-  "room:joined": (payload: { roomId: string; code: string; devices: DeviceInfo[] }) => void;
-  "room:device-joined": (device: DeviceInfo) => void;
-  "room:device-left": (payload: { deviceId: string }) => void;
-  "room:error": (payload: { message: string }) => void;
-  "signal:offer": (payload: { from: string; sdp: RTCSessionDescriptionInit }) => void;
-  "signal:answer": (payload: { from: string; sdp: RTCSessionDescriptionInit }) => void;
-  "signal:ice-candidate": (payload: { from: string; candidate: RTCIceCandidateInit }) => void;
-  "transfer:request": (payload: {
-    from: string;
-    transferId: string;
-    files: { name: string; size: number; type: string }[];
+  "room:created": (payload: { roomId: string; pairingCode: string; expiresAt: number }) => void;
+  "room:joined": (payload: {
+    roomId: string;
+    pairingCode: string;
+    role: "sender" | "receiver";
+    peerName?: string;
   }) => void;
-  "transfer:accept": (payload: { from: string; transferId: string }) => void;
-  "transfer:reject": (payload: { from: string; transferId: string; reason?: string }) => void;
+  "room:peer-joined": (payload: { peerName: string; role: "sender" | "receiver" }) => void;
+  "room:peer-left": (payload: { reason?: string }) => void;
+  "room:expired": () => void;
+  "room:cancelled": (payload: { by: "sender" | "receiver" }) => void;
+  "room:error": (payload: { message: string; code?: string }) => void;
+  "signal:offer": (payload: { sdp: RTCSessionDescriptionInit }) => void;
+  "signal:answer": (payload: { sdp: RTCSessionDescriptionInit }) => void;
+  "signal:ice-candidate": (payload: { candidate: RTCIceCandidateInit }) => void;
+  "transfer:started": () => void;
+  "transfer:completed": () => void;
 }
 
 export interface ClientToServerEvents {
-  "room:create": (payload: { deviceName: string }, callback: (res: { roomId: string; code: string } | { error: string }) => void) => void;
-  "room:join": (payload: { code: string; deviceName: string }, callback: (res: { roomId: string; code: string; devices: DeviceInfo[] } | { error: string }) => void) => void;
-  "room:leave": () => void;
-  "signal:offer": (payload: { to: string; sdp: RTCSessionDescriptionInit }) => void;
-  "signal:answer": (payload: { to: string; sdp: RTCSessionDescriptionInit }) => void;
-  "signal:ice-candidate": (payload: { to: string; candidate: RTCIceCandidateInit }) => void;
-  "transfer:request": (payload: {
-    to: string;
-    transferId: string;
-    files: { name: string; size: number; type: string }[];
-  }) => void;
-  "transfer:accept": (payload: { to: string; transferId: string }) => void;
-  "transfer:reject": (payload: { to: string; transferId: string; reason?: string }) => void;
+  "room:create": (
+    payload: { deviceName: string },
+    callback: (res: { roomId: string; pairingCode: string; expiresAt: number } | { error: string }) => void
+  ) => void;
+  "room:join": (
+    payload: { pairingCode: string; deviceName: string },
+    callback: (
+      res: { roomId: string; pairingCode: string; peerName?: string } | { error: string }
+    ) => void
+  ) => void;
+  "room:cancel": () => void;
+  "room:complete": () => void;
+  "signal:offer": (payload: { sdp: RTCSessionDescriptionInit }) => void;
+  "signal:answer": (payload: { sdp: RTCSessionDescriptionInit }) => void;
+  "signal:ice-candidate": (payload: { candidate: RTCIceCandidateInit }) => void;
+  "transfer:started": () => void;
 }
 
 export interface InterServerEvents {
@@ -51,7 +56,7 @@ export interface InterServerEvents {
 }
 
 export interface SocketData {
-  deviceId: string;
   roomId: string | null;
+  role: "sender" | "receiver" | null;
   deviceName: string;
 }
