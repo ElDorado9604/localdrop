@@ -1,15 +1,18 @@
-/** Normalize pairing code input (uppercase, strip spaces/dashes) */
 export function normalizeCode(input: string): string {
-  return input.replace(/[\s-]/g, "").toUpperCase();
+  return input.replace(/\D/g, "").slice(0, 6);
 }
 
 export function isValidCodeFormat(code: string): boolean {
-  const normalized = normalizeCode(code);
-  return /^[A-Z0-9]{6}$/.test(normalized);
+  return /^\d{6}$/.test(normalizeCode(code));
 }
 
 export function formatCodeForDisplay(code: string): string {
   const n = normalizeCode(code);
   if (n.length !== 6) return n;
-  return `${n.slice(0, 3)}-${n.slice(3)}`;
+  return `${n.slice(0, 3)} ${n.slice(3)}`;
+}
+
+export function buildJoinUrl(code: string): string {
+  if (typeof window === "undefined") return code;
+  return `${window.location.origin}/receive?code=${encodeURIComponent(normalizeCode(code))}`;
 }

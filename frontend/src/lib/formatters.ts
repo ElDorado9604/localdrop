@@ -1,22 +1,25 @@
 export function formatBytes(bytes: number, decimals = 1): string {
-  if (bytes === 0) return "0 B";
+  if (!bytes || bytes < 0) return "0 B";
   const k = 1024;
   const sizes = ["B", "KB", "MB", "GB", "TB"];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(k)), sizes.length - 1);
   return `${parseFloat((bytes / Math.pow(k, i)).toFixed(decimals))} ${sizes[i]}`;
 }
 
 export function formatSpeed(bytesPerSec: number): string {
+  if (!bytesPerSec || bytesPerSec < 0) return "—";
   return `${formatBytes(bytesPerSec)}/s`;
 }
 
-export function formatDuration(ms: number): string {
-  if (ms < 1000) return "<1s";
-  const sec = Math.floor(ms / 1000);
-  if (sec < 60) return `${sec}s`;
-  const min = Math.floor(sec / 60);
-  const rem = sec % 60;
-  return `${min}m ${rem}s`;
+export function formatEta(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return "—";
+  if (seconds < 2) return "<1s";
+  if (seconds < 60) return `${Math.round(seconds)}s`;
+  const min = Math.floor(seconds / 60);
+  const sec = Math.round(seconds % 60);
+  if (min < 60) return `${min}m ${sec}s`;
+  const hr = Math.floor(min / 60);
+  return `${hr}h ${min % 60}m`;
 }
 
 export function truncateName(name: string, max = 28): string {
