@@ -12,137 +12,144 @@ type AppSocket = Socket<ClientToServerEvents, ServerToClientEvents, InterServerE
 
 export function registerSocketHandlers(io: AppServer, roomManager: RoomManager): void {
   io.on("connection", (socket: AppSocket) => {
+    socket.data.roomId = null;
+    socket.data.role = null;
+    socket.data.deviceName = "";
+
     socket.on("room:create", (payload, callback) => {
       try {
-        const { roomId, code, device } = roomManager.createRoom(
-          socket.id,
-          payload.deviceName?.trim() || "Anonymous"
-        );
-        socket.data.deviceId = device.id;
-        socket.data.roomId = roomId;
-        socket.data.deviceName = device.name;
-        socket.join(roomId);
+        leaveCurrent(socket, roomManager, io);
 
-        callback({ roomId, code });
-        // Creator is the only device; no need to emit device-joined to others
-      } catch (err) {
-        console.error("room:create error", err);
+        const name = (payload.deviceName || "Device").trim().slice(0, 32);
+        const room = roomManager.createRoom(socket.id, name);
+        socket.data.roomId = room.roomId;
+        socket.data.role = "sender";
+        socket.data.deviceName = name;
+        socket.join(room.roomId);
+
+        callback({
+          roomId: room.roomId,
+          pairingCode: room.pairingCode,
+          expiresAt: room.expiresAt,
+        });
+      } catch {
         callback({ error: "Failed to create room." });
       }
     });
 
     socket.on("room:join", (payload, callback) => {
       try {
-        const result = roomManager.joinRoom(
-          payload.code,
-          socket.id,
-          payload.deviceName?.trim() || "Anonymous"
-        );
+        leaveCurrent(socket, roomManager, io);
+
+        const name = (payload.deviceName || "Device").trim().slice(0, 32);
+        const result = roomManager.joinRoom(payload.pairingCode, socket.id, name);
 
         if ("error" in result) {
           callback({ error: result.error });
           return;
         }
 
-        const { roomId, code, device, devices } = result;
-        socket.data.deviceId = device.id;
-        socket.data.roomId = roomId;
-        socket.data.deviceName = device.name;
-        socket.join(roomId);
+        const { room } = result;
+        socket.data.roomId = room.roomId;
+        socket.data.role = "receiver";
+        socket.data.deviceName = name;
+        socket.join(room.roomId);
 
-        callback({ roomId, code, devices });
+        callback({
+          roomId: room.roomId,
+          pairingCode: room.pairingCode,
+          peerName: room.senderName,
+        });
 
-        // Notify other devices in the room
-        socket.to(roomId).emit("room:device-joined", device);
-      } catch (err) {
-        console.error("room:join error", err);
+        if (room.senderSocketId) {
+          io.to(room.senderSocketId).emit("room:peer-joined", {
+            peerName: name,
+            role: "receiver",
+          });
+        }
+      } catch {
         callback({ error: "Failed to join room." });
       }
     });
 
-    socket.on("room:leave", () => {
-      handleLeave(socket, roomManager);
+    socket.on("room:cancel", () => {
+      const room = roomManager.getRoomBySocket(socket.id);
+      if (!room) return;
+      const peerId = roomManager.getPeerSocketId(socket.id);
+      const by = socket.data.role === "receiver" ? "receiver" : "sender";
+      roomManager.cancelRoom(room.roomId);
+      if (peerId) {
+        io.to(peerId).emit("room:cancelled", { by });
+      }
+      socket.data.roomId = null;
+      socket.data.role = null;
     });
 
-    // WebRTC signaling relay
+    socket.on("room:complete", () => {
+      const room = roomManager.getRoomBySocket(socket.id);
+      if (!room) return;
+      const peerId = roomManager.getPeerSocketId(socket.id);
+      roomManager.completeRoom(room.roomId);
+      if (peerId) {
+        io.to(peerId).emit("transfer:completed");
+      }
+      socket.data.roomId = null;
+      socket.data.role = null;
+    });
+
+    socket.on("transfer:started", () => {
+      const room = roomManager.getRoomBySocket(socket.id);
+      if (room) roomManager.setStatus(room.roomId, "transferring");
+    });
+
     socket.on("signal:offer", (payload) => {
-      relayToDevice(socket, roomManager, payload.to, "signal:offer", {
-        from: socket.data.deviceId,
-        sdp: payload.sdp,
-      });
+      relay(socket, roomManager, "signal:offer", { sdp: payload.sdp });
     });
 
     socket.on("signal:answer", (payload) => {
-      relayToDevice(socket, roomManager, payload.to, "signal:answer", {
-        from: socket.data.deviceId,
-        sdp: payload.sdp,
-      });
+      relay(socket, roomManager, "signal:answer", { sdp: payload.sdp });
     });
 
     socket.on("signal:ice-candidate", (payload) => {
-      relayToDevice(socket, roomManager, payload.to, "signal:ice-candidate", {
-        from: socket.data.deviceId,
-        candidate: payload.candidate,
-      });
-    });
-
-    // Transfer signaling (metadata only; actual bytes go over WebRTC)
-    socket.on("transfer:request", (payload) => {
-      relayToDevice(socket, roomManager, payload.to, "transfer:request", {
-        from: socket.data.deviceId,
-        transferId: payload.transferId,
-        files: payload.files,
-      });
-    });
-
-    socket.on("transfer:accept", (payload) => {
-      relayToDevice(socket, roomManager, payload.to, "transfer:accept", {
-        from: socket.data.deviceId,
-        transferId: payload.transferId,
-      });
-    });
-
-    socket.on("transfer:reject", (payload) => {
-      relayToDevice(socket, roomManager, payload.to, "transfer:reject", {
-        from: socket.data.deviceId,
-        transferId: payload.transferId,
-        reason: payload.reason,
-      });
+      relay(socket, roomManager, "signal:ice-candidate", { candidate: payload.candidate });
     });
 
     socket.on("disconnect", () => {
-      handleLeave(socket, roomManager);
+      const result = roomManager.handleDisconnect(socket.id);
+      if (result?.peerSocketId) {
+        io.to(result.peerSocketId).emit("room:peer-left", {
+          reason: "disconnect",
+        });
+      }
+      socket.data.roomId = null;
+      socket.data.role = null;
     });
   });
 }
 
-function handleLeave(socket: AppSocket, roomManager: RoomManager): void {
-  const result = roomManager.leaveRoom(socket.id);
-  if (!result) return;
-
-  const { roomId, deviceId } = result;
-  socket.leave(roomId);
-  socket.data.roomId = null;
-
-  if (result.remaining.length > 0) {
-    socket.to(roomId).emit("room:device-left", { deviceId });
-  }
-}
-
-function relayToDevice(
+function leaveCurrent(
   socket: AppSocket,
   roomManager: RoomManager,
-  targetDeviceId: string,
-  event: keyof ServerToClientEvents,
-  payload: unknown
+  io: AppServer
 ): void {
-  const roomId = socket.data.roomId;
-  if (!roomId || !socket.data.deviceId) return;
+  if (!socket.data.roomId) return;
+  const result = roomManager.handleDisconnect(socket.id);
+  if (result?.peerSocketId) {
+    io.to(result.peerSocketId).emit("room:peer-left", { reason: "left" });
+  }
+  if (socket.data.roomId) socket.leave(socket.data.roomId);
+  socket.data.roomId = null;
+  socket.data.role = null;
+}
 
-  const targetSocketId = roomManager.getSocketIdForDevice(roomId, targetDeviceId);
-  if (!targetSocketId) return;
-
-  roomManager.touch(roomId);
+function relay(
+  socket: AppSocket,
+  roomManager: RoomManager,
+  event: "signal:offer" | "signal:answer" | "signal:ice-candidate",
+  payload: { sdp?: RTCSessionDescriptionInit; candidate?: RTCIceCandidateInit }
+): void {
+  const peerId = roomManager.getPeerSocketId(socket.id);
+  if (!peerId) return;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  socket.to(targetSocketId).emit(event as any, payload);
+  socket.to(peerId).emit(event as any, payload);
 }
