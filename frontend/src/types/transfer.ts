@@ -36,6 +36,8 @@ export interface QueuedFile {
   error?: string;
   direction: "send" | "receive";
   bytesDone: number;
+  /** Object URL for a received file (revoked on clear) */
+  blobUrl?: string;
 }
 
 export interface TransferOffer {
@@ -52,6 +54,7 @@ export interface RoomInfo {
   role: "sender" | "receiver" | null;
 }
 
+/** Protocol messages over the DataChannel (JSON except binary chunks) */
 export type ProtocolMessage =
   | { type: "transfer-offer"; files: FileMeta[]; totalSize: number; senderName: string }
   | { type: "transfer-accepted" }
@@ -71,5 +74,7 @@ export type ProtocolMessage =
   | { type: "transfer-cancelled"; reason?: string }
   | { type: "transfer-error"; message: string };
 
+/** Max single file size for safe browser transfers (500 MB) */
 export const MAX_FILE_SIZE = 500 * 1024 * 1024;
+/** Soft warning threshold (100 MB) */
 export const WARN_FILE_SIZE = 100 * 1024 * 1024;
