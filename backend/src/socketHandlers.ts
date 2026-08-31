@@ -72,6 +72,36 @@ export function registerSocketHandlers(io: AppServer, roomManager: RoomManager):
       }
     });
 
+    socket.on("room:rejoin", (payload, callback) => {
+      try {
+        const name = (payload.deviceName || "Device").trim().slice(0, 32);
+        const result = roomManager.rejoinRoom(payload.pairingCode, socket.id, payload.role, name);
+
+        if ("error" in result) {
+          callback({ error: result.error });
+          return;
+        }
+
+        const { room } = result;
+        socket.data.roomId = room.roomId;
+        socket.data.role = payload.role;
+        socket.data.deviceName = name;
+        socket.join(room.roomId);
+
+        const peerName = payload.role === "sender" ? room.receiverName : room.senderName;
+        callback({ roomId: room.roomId, pairingCode: room.pairingCode, peerName });
+
+        const peerId = roomManager.getPeerSocketId(socket.id);
+        if (peerId) {
+          // Reuses the existing peer-joined flow: the sender side listens for
+          // this to (re)issue a fresh WebRTC offer once both sides are back.
+          io.to(peerId).emit("room:peer-joined", { peerName: name, role: payload.role });
+        }
+      } catch {
+        callback({ error: "Failed to reconnect." });
+      }
+    });
+
     socket.on("room:cancel", () => {
       const room = roomManager.getRoomBySocket(socket.id);
       if (!room) return;
