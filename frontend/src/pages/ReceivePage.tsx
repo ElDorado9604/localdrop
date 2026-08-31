@@ -20,11 +20,12 @@ export function ReceivePage() {
   const [pendingCode, setPendingCode] = useState<string | null>(null);
   const [peerName, setPeerName] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [canRetry, setCanRetry] = useState(false);
+  const [retrying, setRetrying] = useState(false);
   const [status, setStatus] = useState<"idle" | "joining" | "connecting" | "ready" | "done">("idle");
   const deviceNameRef = useRef(resolveDeviceName());
-  const statusRef = useRef(status);
-  statusRef.current = status;
   const autoJoined = useRef(false);
+  const joinedCodeRef = useRef<string | null>(null);
 
   const webrtc = useWebRTC({
     sendSignal: (type, payload) => {
@@ -33,27 +34,26 @@ export function ReceivePage() {
       else if (type === "answer") s.emit("signal:answer", { sdp: payload as RTCSessionDescriptionInit });
       else s.emit("signal:ice-candidate", { candidate: payload as RTCIceCandidateInit });
     },
-    onChannelOpen: () => setStatus("ready"),
+    onChannelOpen: () => {
+      setStatus("ready");
+      setError(null);
+      setCanRetry(false);
+      setRetrying(false);
+    },
     onChannelMessage: (data) => transfer.handleMessage(data),
     onLocalCheckFailed: () => {
-      if (statusRef.current === "done") return;
       setError(
         "Local connection could not be established. Confirm that both devices are connected to the same Wi-Fi network or hotspot, then try again."
       );
     },
-    onConnectionFailed: (reason) => {
-      if (statusRef.current === "done") return;
-      setError(reason);
-    },
+    onConnectionFailed: (reason) => setError(reason),
   });
 
   const transfer = useTransfer({
     getChannel: webrtc.getChannel,
     deviceName: deviceNameRef.current,
     onComplete: () => {
-      webrtc.markCompleted();
       setStatus("done");
-      setError(null);
       getSocket().emit("room:complete");
     },
     onCancelled: () => {
@@ -71,8 +71,11 @@ export function ReceivePage() {
     if (!s.connected) s.connect();
 
     const onPeerLeft = () => {
-      if (statusRef.current === "done") return;
       setError("The other device disconnected.");
+      webrtc.close();
+      // A peer-left event only fires once we'd actually joined a room, so
+      // it's still alive server-side and rejoinable via the same code.
+      setCanRetry(!!joinedCodeRef.current);
     };
     const onCancelled = () => {
       setError("Transfer cancelled. No files were stored by this app.");
@@ -127,9 +130,35 @@ export function ReceivePage() {
         setStatus("idle");
         return;
       }
+      joinedCodeRef.current = code;
       setPeerName(res.peerName || "Sender");
       setStatus("connecting");
     });
+  }, []);
+
+  const retry = useCallback(() => {
+    const code = joinedCodeRef.current;
+    if (!code) return;
+    setRetrying(true);
+    setError(null);
+    const s = getSocket();
+    if (!s.connected) s.connect();
+    s.emit(
+      "room:rejoin",
+      { pairingCode: code, role: "receiver", deviceName: deviceNameRef.current },
+      (res) => {
+        if ("error" in res) {
+          setRetrying(false);
+          setError(res.error);
+          return;
+        }
+        setPeerName(res.peerName || "Sender");
+        setStatus("connecting");
+        // The still-connected sender is notified server-side and will issue
+        // a fresh WebRTC offer; we just wait for it via the existing
+        // signal:offer listener below.
+      }
+    );
   }, []);
 
   const handleCodeSubmit = (e: React.FormEvent) => {
@@ -151,17 +180,27 @@ export function ReceivePage() {
     <div className="mx-auto max-w-md px-4 py-6">
       <div className="mb-6 flex items-center justify-between">
         <Link to="/" className="text-sm text-slate-500 hover:text-slate-900 dark:hover:text-white">
-          {'\u2190'} Home
+          \u2190 Home
         </Link>
         <span className="text-xs text-slate-500">Receive</span>
       </div>
 
       <h1 className="text-2xl font-bold text-slate-900 dark:text-white">Receive files</h1>
-      <p className="mt-1 text-sm text-slate-500">Enter the code shown on the sender's device.</p>
+      <p className="mt-1 text-sm text-slate-500">Enter the code shown on the sender\u2019s device.</p>
 
       {error && (
-        <div className="mt-4">
+        <div className="mt-4 space-y-2">
           <ErrorMessage message={error} onDismiss={() => setError(null)} />
+          {canRetry && (
+            <button
+              type="button"
+              onClick={retry}
+              disabled={retrying}
+              className="w-full rounded-xl bg-sky-600 py-2.5 text-sm font-medium text-white hover:bg-sky-500 disabled:opacity-50"
+            >
+              {retrying ? "Reconnecting\u2026" : "Retry connection"}
+            </button>
+          )}
         </div>
       )}
 
@@ -188,11 +227,11 @@ export function ReceivePage() {
       )}
 
       {status === "joining" && (
-        <p className="mt-8 text-center text-slate-500">Joining room...</p>
+        <p className="mt-8 text-center text-slate-500">Joining room\u2026</p>
       )}
 
       {status === "connecting" && (
-        <p className="mt-8 text-center text-slate-500 animate-pulse">Connecting locally...</p>
+        <p className="mt-8 text-center text-slate-500 animate-pulse">Connecting locally\u2026</p>
       )}
 
       {(status === "ready" ||
@@ -213,8 +252,9 @@ export function ReceivePage() {
             <div className="rounded-2xl border border-slate-200 bg-white p-5 dark:border-slate-700 dark:bg-slate-900">
               <h2 className="font-semibold text-slate-900 dark:text-white">Incoming transfer</h2>
               <p className="mt-1 text-sm text-slate-500">
-                From {transfer.offer.senderName} · {transfer.offer.files.length} file
-                {transfer.offer.files.length !== 1 ? "s" : ""} · {formatBytes(transfer.offer.totalSize)}
+                From {transfer.offer.senderName} \u00b7 {transfer.offer.files.length} file
+                {transfer.offer.files.length !== 1 ? "s" : ""} \u00b7{" "}
+                {formatBytes(transfer.offer.totalSize)}
               </p>
               <ul className="mt-3 max-h-40 space-y-1 overflow-y-auto text-sm text-slate-600 dark:text-slate-300">
                 {transfer.offer.files.map((f) => (
@@ -248,7 +288,7 @@ export function ReceivePage() {
               bytesDone={transfer.bytesDone}
               bytesTotal={transfer.bytesTotal}
               speed={transfer.speed}
-              label="Receiving..."
+              label="Receiving\u2026"
             />
           )}
 
