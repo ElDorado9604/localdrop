@@ -14,5 +14,7 @@ export function formatCodeForDisplay(code: string): string {
 
 export function buildJoinUrl(code: string): string {
   if (typeof window === "undefined") return code;
-  return `${window.location.origin}/receive?code=${encodeURIComponent(normalizeCode(code))}`;
+  const url = new URL("/receive", window.location.origin);
+  url.searchParams.set("code", normalizeCode(code));
+  return url.toString();
 }
