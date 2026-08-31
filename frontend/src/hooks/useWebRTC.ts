@@ -29,6 +29,8 @@ export function useWebRTC(options: UseWebRTCOptions) {
   const pendingIce = useRef<RTCIceCandidateInit[]>([]);
   const remoteSet = useRef(false);
   const makingOffer = useRef(false);
+  /** When true, ignore failed/disconnected (post-transfer teardown). */
+  const completedRef = useRef(false);
 
   const wireChannel = useCallback((channel: RTCDataChannel) => {
     channel.binaryType = "arraybuffer";
@@ -43,7 +45,9 @@ export function useWebRTC(options: UseWebRTCOptions) {
       optionsRef.current.onChannelClose?.();
     };
     channel.onerror = () => {
-      optionsRef.current.onConnectionFailed?.("Data channel error");
+      if (!completedRef.current) {
+        optionsRef.current.onConnectionFailed?.("Data channel error");
+      }
     };
     channel.onmessage = (event) => {
       optionsRef.current.onChannelMessage?.(event.data);
@@ -67,15 +71,17 @@ export function useWebRTC(options: UseWebRTCOptions) {
           setPcState(state);
           if (state === "connected") {
             const ok = await assertLocalCandidatePair(pc);
-            if (!ok) {
+            if (!ok && !completedRef.current) {
               optionsRef.current.onLocalCheckFailed?.();
               pc.close();
             }
           }
           if (state === "failed") {
-            optionsRef.current.onConnectionFailed?.(
-              "Could not establish a direct link. Put both devices on the same Wi\u2011Fi or hotspot and try again."
-            );
+            if (!completedRef.current) {
+              optionsRef.current.onConnectionFailed?.(
+                "Could not establish a direct link. Put both devices on the same Wi-Fi or hotspot and try again."
+              );
+            }
           }
         }
       );
@@ -181,7 +187,12 @@ export function useWebRTC(options: UseWebRTCOptions) {
 
   const getChannel = useCallback(() => channelRef.current, []);
 
+  const markCompleted = useCallback(() => {
+    completedRef.current = true;
+  }, []);
+
   const close = useCallback(() => {
+    completedRef.current = true;
     channelRef.current?.close();
     pcRef.current?.close();
     channelRef.current = null;
@@ -202,5 +213,6 @@ export function useWebRTC(options: UseWebRTCOptions) {
     handleIce,
     getChannel,
     close,
+    markCompleted,
   };
 }
