@@ -132,11 +132,13 @@ export function useTransfer(options: UseTransferOptions) {
     }
   }, [queue, sendJson]);
 
-  const runSend = useCallback(async () => {
-    const pending = queue.filter((f) => f.direction === "send" && f.status === "pending" && f.file);
+  const runSendFiles = useCallback(async (pending: QueuedFile[]) => {
     setPhase("transferring");
     startTimeRef.current = Date.now();
-    let done = 0;
+    let done = queue.reduce(
+      (s, f) => (f.direction === "send" && f.status === "completed" ? s + f.size : s),
+      0
+    );
 
     for (let i = 0; i < pending.length; i++) {
       if (cancelledRef.current) break;
@@ -196,6 +198,32 @@ export function useTransfer(options: UseTransferOptions) {
       optionsRef.current.onComplete?.();
     }
   }, [queue, sendJson, updateFile]);
+
+  const runSend = useCallback(async () => {
+    const pending = queue.filter((f) => f.direction === "send" && f.status === "pending" && f.file);
+    if (pending.length === 0) return;
+    await runSendFiles(pending);
+  }, [queue, runSendFiles]);
+
+  /**
+   * Resume sending after a dropped/re-established connection (e.g. the
+   * sender or receiver's screen locked mid-transfer). Restarts whichever
+   * file was interrupted from the beginning, then continues with any files
+   * that hadn't started yet. Already-completed files are left untouched —
+   * no re-offer/accept handshake is needed since the receiver already has
+   * the full file list from the original transfer-offer.
+   */
+  const resumeSend = useCallback(() => {
+    const interrupted = queue.filter((f) => f.direction === "send" && f.status === "sending" && f.file);
+    const notStarted = queue.filter((f) => f.direction === "send" && f.status === "pending" && f.file);
+    const toResume = [...interrupted, ...notStarted];
+    if (toResume.length === 0) return;
+    cancelledRef.current = false;
+    for (const f of interrupted) {
+      updateFile(f.id, { status: "pending", progress: 0, bytesDone: 0 });
+    }
+    void runSendFiles(toResume);
+  }, [queue, runSendFiles, updateFile]);
 
   const acceptOffer = useCallback(() => {
     sendJson({ type: "transfer-accepted" });
@@ -405,6 +433,7 @@ export function useTransfer(options: UseTransferOptions) {
     removeFile,
     clearQueue,
     startSend,
+    resumeSend,
     acceptOffer,
     rejectOffer,
     cancel,
