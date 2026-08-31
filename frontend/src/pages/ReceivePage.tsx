@@ -140,13 +140,13 @@ export function ReceivePage() {
     <div className="mx-auto max-w-md px-4 py-6">
       <div className="mb-6 flex items-center justify-between">
         <Link to="/" className="text-sm text-slate-500 hover:text-slate-900 dark:hover:text-white">
-          ← Home
+          \u2190 Home
         </Link>
         <span className="text-xs text-slate-500">Receive</span>
       </div>
 
       <h1 className="text-2xl font-bold text-slate-900 dark:text-white">Receive files</h1>
-      <p className="mt-1 text-sm text-slate-500">Enter the code shown on the sender’s device.</p>
+      <p className="mt-1 text-sm text-slate-500">Enter the code shown on the sender\u2019s device.</p>
 
       {error && (
         <div className="mt-4">
@@ -177,14 +177,18 @@ export function ReceivePage() {
       )}
 
       {status === "joining" && (
-        <p className="mt-8 text-center text-slate-500">Joining room…</p>
+        <p className="mt-8 text-center text-slate-500">Joining room\u2026</p>
       )}
 
       {status === "connecting" && (
-        <p className="mt-8 text-center text-slate-500 animate-pulse">Connecting locally…</p>
+        <p className="mt-8 text-center text-slate-500 animate-pulse">Connecting locally\u2026</p>
       )}
 
-      {(status === "ready" || status === "done" || transfer.phase === "offering" || transfer.phase === "transferring") && (
+      {(status === "ready" ||
+        status === "done" ||
+        transfer.phase === "offering" ||
+        transfer.phase === "transferring" ||
+        transfer.phase === "completed") && (
         <div className="mt-6 space-y-6">
           {peerName && (
             <div className="rounded-2xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-center">
@@ -198,8 +202,9 @@ export function ReceivePage() {
             <div className="rounded-2xl border border-slate-200 bg-white p-5 dark:border-slate-700 dark:bg-slate-900">
               <h2 className="font-semibold text-slate-900 dark:text-white">Incoming transfer</h2>
               <p className="mt-1 text-sm text-slate-500">
-                From {transfer.offer.senderName} · {transfer.offer.files.length} file
-                {transfer.offer.files.length !== 1 ? "s" : ""} · {formatBytes(transfer.offer.totalSize)}
+                From {transfer.offer.senderName} \u00b7 {transfer.offer.files.length} file
+                {transfer.offer.files.length !== 1 ? "s" : ""} \u00b7{" "}
+                {formatBytes(transfer.offer.totalSize)}
               </p>
               <ul className="mt-3 max-h-40 space-y-1 overflow-y-auto text-sm text-slate-600 dark:text-slate-300">
                 {transfer.offer.files.map((f) => (
@@ -233,11 +238,15 @@ export function ReceivePage() {
               bytesDone={transfer.bytesDone}
               bytesTotal={transfer.bytesTotal}
               speed={transfer.speed}
-              label="Receiving…"
+              label="Receiving\u2026"
             />
           )}
 
-          <FileQueue files={transfer.queue} />
+          <FileQueue
+            files={transfer.queue}
+            onDownload={transfer.downloadFile}
+            onShare={transfer.shareFile}
+          />
 
           {status === "done" || transfer.phase === "completed" ? (
             <div className="rounded-2xl border border-emerald-500/30 bg-emerald-500/10 p-6 text-center">
@@ -245,12 +254,23 @@ export function ReceivePage() {
                 Transfer complete
               </p>
               <p className="mt-1 text-sm text-slate-500">
-                Files were saved through your browser’s download flow.
+                Use Download on each file, Save to Photos for images, or grab everything as a ZIP.
               </p>
+              {transfer.queue.some(
+                (f) => f.status === "completed" && f.direction === "receive"
+              ) && (
+                <button
+                  type="button"
+                  onClick={() => void transfer.downloadAllZip()}
+                  className="mt-4 w-full rounded-xl bg-sky-600 px-6 py-2.5 text-sm font-medium text-white hover:bg-sky-500"
+                >
+                  Download all as ZIP
+                </button>
+              )}
               <button
                 type="button"
                 onClick={() => navigate("/")}
-                className="mt-4 rounded-xl bg-slate-900 px-6 py-2.5 text-sm text-white dark:bg-white dark:text-slate-900"
+                className="mt-3 rounded-xl bg-slate-900 px-6 py-2.5 text-sm text-white dark:bg-white dark:text-slate-900"
               >
                 Done
               </button>
