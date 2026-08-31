@@ -36,7 +36,13 @@ export interface ClientToServerEvents {
 
 export type AppSocket = Socket<ServerToClientEvents, ClientToServerEvents>;
 
-const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || undefined;
+function resolveSocketUrl(): string | undefined {
+  const raw = import.meta.env.VITE_SOCKET_URL;
+  if (!raw) return undefined;
+  return raw.replace(/\/+$/, "");
+}
+
+const SOCKET_URL = resolveSocketUrl();
 
 let socket: AppSocket | null = null;
 

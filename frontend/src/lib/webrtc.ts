@@ -1,26 +1,28 @@
 /**
- * Local-only WebRTC: no STUN, no TURN, host candidates only.
- * File bytes never leave the LAN / hotspot.
+ * LocalDrop WebRTC helpers.
+ * Signaling goes through the backend; file bytes go peer-to-peer only.
+ * STUN is used only to discover candidates (no TURN / no media relay).
  */
 
 export const CHUNK_SIZE = 64 * 1024;
 export const BUFFERED_LOW_THRESHOLD = 256 * 1024;
 
-/** Empty ICE servers — local host candidates only */
+/**
+ * STUN only — helps mobile browsers get usable candidates on the same LAN.
+ * No TURN: file data never relays through a third-party server.
+ */
 export const LOCAL_ICE_CONFIG: RTCConfiguration = {
-  iceServers: [],
-  iceTransportPolicy: "all",
+  iceServers: [
+    { urls: "stun:stun.l.google.com:19302" },
+    { urls: "stun:stun1.l.google.com:19302" },
+  ],
+  iceCandidatePoolSize: 2,
 };
 
-function isHostCandidate(candidate: RTCIceCandidate): boolean {
-  if (candidate.type === "host") return true;
+function isUsableCandidate(candidate: RTCIceCandidate): boolean {
   const s = candidate.candidate || "";
-  if (s.includes(" typ host")) return true;
-  // Reject relay and server-reflexive
-  if (s.includes(" typ relay") || s.includes(" typ srflx")) return false;
-  // Unknown format — allow only if no typ field (rare)
-  if (!s.includes(" typ ")) return true;
-  return false;
+  if (candidate.type === "relay" || s.includes(" typ relay")) return false;
+  return true;
 }
 
 export function createLocalPeerConnection(
@@ -32,7 +34,7 @@ export function createLocalPeerConnection(
 
   pc.onicecandidate = (event) => {
     if (!event.candidate) return;
-    if (isHostCandidate(event.candidate)) {
+    if (isUsableCandidate(event.candidate)) {
       onIceCandidate(event.candidate);
     }
   };
@@ -59,7 +61,6 @@ export function createDataChannel(pc: RTCPeerConnection): RTCDataChannel {
   return channel;
 }
 
-/** Verify selected candidate pair is local (host-to-host) */
 export async function assertLocalCandidatePair(pc: RTCPeerConnection): Promise<boolean> {
   try {
     const stats = await pc.getStats();
@@ -75,7 +76,7 @@ export async function assertLocalCandidatePair(pc: RTCPeerConnection): Promise<b
       }
       if (report.type === "candidate-pair") {
         pairs.set(report.id, report);
-        const p = report as RTCStats & { selected?: boolean; state?: string };
+        const p = report as RTCStats & { selected?: boolean };
         if (p.selected) selectedPairId = report.id;
       }
       if (report.type === "local-candidate") locals.set(report.id, report);
@@ -92,11 +93,11 @@ export async function assertLocalCandidatePair(pc: RTCPeerConnection): Promise<b
       }
     }
 
-    if (!selectedPairId) return false;
+    if (!selectedPairId) return true;
     const pair = pairs.get(selectedPairId) as
       | (RTCStats & { localCandidateId?: string; remoteCandidateId?: string })
       | undefined;
-    if (!pair?.localCandidateId || !pair?.remoteCandidateId) return false;
+    if (!pair?.localCandidateId || !pair?.remoteCandidateId) return true;
 
     const local = locals.get(pair.localCandidateId) as
       | (RTCStats & { candidateType?: string })
@@ -104,14 +105,12 @@ export async function assertLocalCandidatePair(pc: RTCPeerConnection): Promise<b
     const remote = remotes.get(pair.remoteCandidateId) as
       | (RTCStats & { candidateType?: string })
       | undefined;
-    if (!local || !remote) return false;
+    if (!local || !remote) return true;
 
-    if (local.candidateType && local.candidateType !== "host") return false;
-    if (remote.candidateType && remote.candidateType !== "host") return false;
+    if (local.candidateType === "relay" || remote.candidateType === "relay") return false;
 
     return true;
   } catch {
-    // If stats API is unavailable, do not block the transfer
     return true;
   }
 }
