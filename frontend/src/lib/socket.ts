@@ -26,6 +26,12 @@ export interface ClientToServerEvents {
       res: { roomId: string; pairingCode: string; peerName?: string } | { error: string }
     ) => void
   ) => void;
+  "room:rejoin": (
+    payload: { pairingCode: string; role: "sender" | "receiver"; deviceName: string },
+    callback: (
+      res: { roomId: string; pairingCode: string; peerName?: string } | { error: string }
+    ) => void
+  ) => void;
   "room:cancel": () => void;
   "room:complete": () => void;
   "signal:offer": (payload: { sdp: RTCSessionDescriptionInit }) => void;
