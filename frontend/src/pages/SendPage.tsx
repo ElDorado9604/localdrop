@@ -1,5 +1,10 @@
-import { useState, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { Link, useNavigate } from "react-router-dom";
+import { getSocket } from "../lib/socket";
+import { resolveDeviceName, isAppleMobile } from "../lib/device";
+import { supportsWebRTC } from "../lib/webrtc";
+import { useWebRTC } from "../hooks/useWebRTC";
+import { useTransfer } from "../hooks/useTransfer";
 import { DeviceNameDialog } from "../components/DeviceNameDialog";
 import { PairingCode } from "../components/PairingCode";
 import { QRPairing } from "../components/QRPairing";
@@ -7,159 +12,249 @@ import { FilePicker } from "../components/FilePicker";
 import { FileQueue } from "../components/FileQueue";
 import { TransferProgress } from "../components/TransferProgress";
 import { ErrorMessage } from "../components/ErrorMessage";
-import { ConnectionStatus } from "../components/ConnectionStatus";
-import type { ConnectionState, RoomState, DeviceInfo, QueuedFile } from "../types/transfer";
 
-interface SendPageProps {
-  connectionState: ConnectionState;
-  room: RoomState;
-  error: string | null;
-  clearError: () => void;
-  createRoom: (deviceName?: string) => Promise<{ roomId: string; code: string } | null>;
-  leaveRoom: () => void;
-  queue: QueuedFile[];
-  addFilesToSend: (files: FileList | File[]) => void;
-  removeFromQueue: (id: string) => void;
-  clearCompleted: () => void;
-  startSend: (remoteDeviceId: string) => Promise<void>;
-  cancelFile: (id: string, remoteDeviceId?: string) => void;
-  devices: DeviceInfo[];
-}
-
-export function SendPage({
-  connectionState,
-  room,
-  error,
-  clearError,
-  createRoom,
-  leaveRoom,
-  queue,
-  addFilesToSend,
-  removeFromQueue,
-  clearCompleted,
-  startSend,
-  cancelFile,
-  devices,
-}: SendPageProps) {
-  const [showNameDialog, setShowNameDialog] = useState(false);
-  const [creating, setCreating] = useState(false);
+export function SendPage() {
   const navigate = useNavigate();
+  const [showName, setShowName] = useState(false);
+  const [pairingCode, setPairingCode] = useState<string | null>(null);
+  const [peerName, setPeerName] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [status, setStatus] = useState<"idle" | "creating" | "waiting" | "paired" | "done">("idle");
+  const deviceNameRef = useRef(resolveDeviceName());
 
-  const handleCreate = useCallback(async (name: string) => {
-    setShowNameDialog(false);
-    setCreating(true);
-    const result = await createRoom(name);
-    setCreating(false);
-    if (result) {
-      // stay on page; room is ready
+  const webrtc = useWebRTC({
+    sendSignal: (type, payload) => {
+      const s = getSocket();
+      if (type === "offer") s.emit("signal:offer", { sdp: payload as RTCSessionDescriptionInit });
+      else if (type === "answer") s.emit("signal:answer", { sdp: payload as RTCSessionDescriptionInit });
+      else s.emit("signal:ice-candidate", { candidate: payload as RTCIceCandidateInit });
+    },
+    onChannelOpen: () => {
+      /* ready for transfer */
+    },
+    onChannelMessage: (data) => transfer.handleMessage(data),
+    onLocalCheckFailed: () => {
+      setError(
+        "Local connection could not be established. Confirm that both devices are connected to the same Wi-Fi network or hotspot, then try again."
+      );
+    },
+    onConnectionFailed: (reason) => setError(reason),
+  });
+
+  const transfer = useTransfer({
+    getChannel: webrtc.getChannel,
+    deviceName: deviceNameRef.current,
+    onComplete: () => {
+      setStatus("done");
+      getSocket().emit("room:complete");
+    },
+    onCancelled: () => {
+      setError("Transfer cancelled. No files were stored by this app.");
+    },
+    onError: (m) => setError(m),
+  });
+
+  useEffect(() => {
+    if (!supportsWebRTC()) {
+      setError("This browser does not support WebRTC DataChannels required for LocalDrop.");
+      return;
     }
-  }, [createRoom]);
 
-  const otherDevices = devices.filter((d) => d.id !== room.myDeviceId);
+    const s = getSocket();
+    if (!s.connected) s.connect();
+
+    const onPeerJoined = (p: { peerName: string }) => {
+      setPeerName(p.peerName);
+      setStatus("paired");
+      void webrtc.createOffer();
+    };
+    const onPeerLeft = () => {
+      setPeerName(null);
+      setError("The other device disconnected.");
+      setStatus((st) => (st === "waiting" ? "waiting" : "idle"));
+    };
+    const onCancelled = () => {
+      setError("Transfer cancelled. No files were stored by this app.");
+      setStatus("idle");
+      setPairingCode(null);
+    };
+    const onOffer = (p: { sdp: RTCSessionDescriptionInit }) => void webrtc.handleOffer(p.sdp);
+    const onAnswer = (p: { sdp: RTCSessionDescriptionInit }) => void webrtc.handleAnswer(p.sdp);
+    const onIce = (p: { candidate: RTCIceCandidateInit }) => void webrtc.handleIce(p.candidate);
+
+    s.on("room:peer-joined", onPeerJoined);
+    s.on("room:peer-left", onPeerLeft);
+    s.on("room:cancelled", onCancelled);
+    s.on("signal:offer", onOffer);
+    s.on("signal:answer", onAnswer);
+    s.on("signal:ice-candidate", onIce);
+
+    return () => {
+      s.off("room:peer-joined", onPeerJoined);
+      s.off("room:peer-left", onPeerLeft);
+      s.off("room:cancelled", onCancelled);
+      s.off("signal:offer", onOffer);
+      s.off("signal:answer", onAnswer);
+      s.off("signal:ice-candidate", onIce);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const createRoom = useCallback((name: string) => {
+    deviceNameRef.current = name;
+    setShowName(false);
+    setStatus("creating");
+    setError(null);
+    const s = getSocket();
+    if (!s.connected) s.connect();
+    s.emit("room:create", { deviceName: name }, (res) => {
+      if ("error" in res) {
+        setError(res.error);
+        setStatus("idle");
+        return;
+      }
+      setPairingCode(res.pairingCode);
+      setStatus("waiting");
+    });
+  }, []);
+
+  const cancel = () => {
+    getSocket().emit("room:cancel");
+    webrtc.close();
+    transfer.clearQueue();
+    setPairingCode(null);
+    setPeerName(null);
+    setStatus("idle");
+    navigate("/");
+  };
 
   return (
-    <div className="mx-auto max-w-lg px-4 py-8">
+    <div className="mx-auto max-w-md px-4 py-6">
       <div className="mb-6 flex items-center justify-between">
-        <Link to="/" className="text-sm text-slate-400 hover:text-white">
+        <Link to="/" className="text-sm text-slate-500 hover:text-slate-900 dark:hover:text-white">
           ← Home
         </Link>
-        <ConnectionStatus state={connectionState} />
+        <span className="text-xs text-slate-500">Send</span>
       </div>
 
-      <h1 className="text-2xl font-bold text-white">Send files</h1>
-      <p className="mt-1 text-sm text-slate-400">
-        Create a room, let others join, then share files.
-      </p>
+      <h1 className="text-2xl font-bold text-slate-900 dark:text-white">Send files</h1>
+      <p className="mt-1 text-sm text-slate-500">Create a room, then let the other device join.</p>
 
       {error && (
         <div className="mt-4">
-          <ErrorMessage message={error} onDismiss={clearError} />
+          <ErrorMessage message={error} onDismiss={() => setError(null)} />
         </div>
       )}
 
-      {!room.code ? (
-        <div className="mt-8">
-          <button
-            type="button"
-            disabled={creating || connectionState === "disconnected" || connectionState === "error"}
-            onClick={() => setShowNameDialog(true)}
-            className="w-full rounded-xl bg-sky-600 px-4 py-3 font-medium text-white hover:bg-sky-500 disabled:opacity-50"
-          >
-            {creating ? "Creating room…" : "Create room"}
-          </button>
-        </div>
-      ) : (
-        <div className="mt-8 space-y-8">
-          <div className="rounded-2xl border border-slate-700 bg-slate-900/80 p-6">
-            <PairingCode code={room.code} />
-            <div className="mt-6 flex justify-center">
-              <QRPairing code={room.code} />
-            </div>
-          </div>
+      {status === "idle" && (
+        <button
+          type="button"
+          onClick={() => setShowName(true)}
+          className="mt-8 w-full rounded-2xl bg-sky-600 py-3.5 font-medium text-white hover:bg-sky-500"
+        >
+          Create room
+        </button>
+      )}
 
-          {otherDevices.length > 0 && (
-            <div>
-              <h2 className="mb-2 text-sm font-medium text-slate-300">
-                Connected devices
-              </h2>
-              <ul className="space-y-2">
-                {otherDevices.map((d) => (
-                  <li
-                    key={d.id}
-                    className="flex items-center justify-between rounded-xl border border-slate-700 bg-slate-900 px-4 py-3"
-                  >
-                    <span className="font-medium text-white">{d.name}</span>
-                    <button
-                      type="button"
-                      onClick={() => startSend(d.id)}
-                      disabled={queue.filter((f) => f.status === "pending").length === 0}
-                      className="rounded-lg bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-40"
-                    >
-                      Send files
-                    </button>
-                  </li>
-                ))}
-              </ul>
+      {status === "creating" && (
+        <p className="mt-8 text-center text-slate-500">Creating room…</p>
+      )}
+
+      {(status === "waiting" || status === "paired" || status === "done") && pairingCode && (
+        <div className="mt-6 space-y-6">
+          {status === "waiting" && (
+            <div className="rounded-2xl border border-slate-200 bg-white p-6 dark:border-slate-700 dark:bg-slate-900">
+              <PairingCode code={pairingCode} />
+              <div className="mt-6 flex justify-center">
+                <QRPairing code={pairingCode} />
+              </div>
+              <p className="mt-4 text-center text-sm text-slate-500 animate-pulse">
+                Waiting for receiver…
+              </p>
             </div>
           )}
 
-          {otherDevices.length === 0 && (
-            <p className="text-center text-sm text-slate-500">
-              Waiting for someone to join…
+          {status === "paired" && peerName && (
+            <div className="rounded-2xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-center">
+              <p className="text-sm font-medium text-emerald-800 dark:text-emerald-200">
+                Connected to {peerName}
+              </p>
+            </div>
+          )}
+
+          {(status === "paired" || status === "done") && (
+            <>
+              <FilePicker
+                onFilesSelected={transfer.addFiles}
+                disabled={transfer.phase === "transferring"}
+              />
+              <FileQueue files={transfer.queue} onRemove={transfer.removeFile} />
+
+              {transfer.phase === "transferring" && (
+                <TransferProgress
+                  bytesDone={transfer.bytesDone}
+                  bytesTotal={transfer.bytesTotal}
+                  speed={transfer.speed}
+                  label="Sending…"
+                />
+              )}
+
+              {transfer.phase === "completed" || status === "done" ? (
+                <div className="rounded-2xl border border-emerald-500/30 bg-emerald-500/10 p-6 text-center">
+                  <p className="text-lg font-semibold text-emerald-800 dark:text-emerald-200">
+                    Transfer complete
+                  </p>
+                  <p className="mt-1 text-sm text-slate-500">Room closed. Nothing was stored on any server.</p>
+                  <button
+                    type="button"
+                    onClick={() => navigate("/")}
+                    className="mt-4 rounded-xl bg-slate-900 px-6 py-2.5 text-sm text-white dark:bg-white dark:text-slate-900"
+                  >
+                    Done
+                  </button>
+                </div>
+              ) : (
+                transfer.queue.some((f) => f.status === "pending") &&
+                transfer.phase !== "transferring" &&
+                transfer.phase !== "awaiting-accept" && (
+                  <button
+                    type="button"
+                    onClick={() => transfer.startSend()}
+                    className="w-full rounded-2xl bg-emerald-600 py-3.5 font-medium text-white hover:bg-emerald-500"
+                  >
+                    Send
+                  </button>
+                )
+              )}
+
+              {transfer.phase === "awaiting-accept" && (
+                <p className="text-center text-sm text-slate-500">Waiting for receiver to accept…</p>
+              )}
+            </>
+          )}
+
+          {isAppleMobile() && (
+            <p className="text-center text-xs text-amber-700 dark:text-amber-300/90">
+              Keep this page open and keep the screen awake during large transfers.
             </p>
           )}
 
-          <div>
-            <h2 className="mb-3 text-sm font-medium text-slate-300">Files to send</h2>
-            <FilePicker onFilesSelected={addFilesToSend} />
-            <div className="mt-4">
-              <FileQueue
-                files={queue}
-                onRemove={removeFromQueue}
-                onCancel={(id) => cancelFile(id)}
-                onClearCompleted={clearCompleted}
-              />
-            </div>
-            <TransferProgress files={queue} />
-          </div>
-
-          <button
-            type="button"
-            onClick={() => {
-              leaveRoom();
-              navigate("/");
-            }}
-            className="w-full rounded-xl border border-slate-600 px-4 py-2.5 text-sm text-slate-300 hover:bg-slate-800"
-          >
-            Leave room
-          </button>
+          {status !== "done" && (
+            <button
+              type="button"
+              onClick={cancel}
+              className="w-full rounded-xl border border-slate-300 py-2.5 text-sm text-slate-600 dark:border-slate-600 dark:text-slate-300"
+            >
+              Cancel
+            </button>
+          )}
         </div>
       )}
 
       <DeviceNameDialog
-        open={showNameDialog}
-        onConfirm={handleCreate}
-        onCancel={() => setShowNameDialog(false)}
+        open={showName}
+        onConfirm={createRoom}
+        onCancel={() => setShowName(false)}
       />
     </div>
   );
