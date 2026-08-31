@@ -21,6 +21,8 @@ export function SendPage() {
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<"idle" | "creating" | "waiting" | "paired" | "done">("idle");
   const deviceNameRef = useRef(resolveDeviceName());
+  const statusRef = useRef(status);
+  statusRef.current = status;
 
   const webrtc = useWebRTC({
     sendSignal: (type, payload) => {
@@ -35,18 +37,24 @@ export function SendPage() {
     },
     onChannelMessage: (data) => transfer.handleMessage(data),
     onLocalCheckFailed: () => {
+      if (statusRef.current === "done") return;
       setError(
         "Local connection could not be established. Confirm that both devices are connected to the same Wi-Fi network or hotspot, then try again."
       );
     },
-    onConnectionFailed: (reason) => setError(reason),
+    onConnectionFailed: (reason) => {
+      if (statusRef.current === "done") return;
+      setError(reason);
+    },
   });
 
   const transfer = useTransfer({
     getChannel: webrtc.getChannel,
     deviceName: deviceNameRef.current,
     onComplete: () => {
+      webrtc.markCompleted();
       setStatus("done");
+      setError(null);
       getSocket().emit("room:complete");
     },
     onCancelled: () => {
@@ -72,6 +80,7 @@ export function SendPage() {
       }, 400);
     };
     const onPeerLeft = () => {
+      if (statusRef.current === "done") return;
       setPeerName(null);
       setError("The other device disconnected.");
       setStatus((st) => (st === "waiting" ? "waiting" : "idle"));
@@ -135,7 +144,7 @@ export function SendPage() {
     <div className="mx-auto max-w-md px-4 py-6">
       <div className="mb-6 flex items-center justify-between">
         <Link to="/" className="text-sm text-slate-500 hover:text-slate-900 dark:hover:text-white">
-          \u2190 Home
+          {'\u2190'} Home
         </Link>
         <span className="text-xs text-slate-500">Send</span>
       </div>
@@ -160,7 +169,7 @@ export function SendPage() {
       )}
 
       {status === "creating" && (
-        <p className="mt-8 text-center text-slate-500">Creating room\u2026</p>
+        <p className="mt-8 text-center text-slate-500">Creating room...</p>
       )}
 
       {(status === "waiting" || status === "paired" || status === "done") && pairingCode && (
@@ -172,7 +181,7 @@ export function SendPage() {
                 <QRPairing code={pairingCode} />
               </div>
               <p className="mt-4 text-center text-sm text-slate-500 animate-pulse">
-                Waiting for receiver\u2026
+                Waiting for receiver...
               </p>
             </div>
           )}
@@ -193,8 +202,8 @@ export function SendPage() {
                 }`}
               >
                 {webrtc.channelOpen
-                  ? `Ready \u2014 linked to ${peerName}`
-                  : `Pairing with ${peerName}\u2026`}
+                  ? `Ready - linked to ${peerName}`
+                  : `Pairing with ${peerName}...`}
               </p>
             </div>
           )}
@@ -212,7 +221,7 @@ export function SendPage() {
                   bytesDone={transfer.bytesDone}
                   bytesTotal={transfer.bytesTotal}
                   speed={transfer.speed}
-                  label="Sending\u2026"
+                  label="Sending..."
                 />
               )}
 
@@ -240,13 +249,13 @@ export function SendPage() {
                     disabled={!webrtc.channelOpen}
                     className="w-full rounded-2xl bg-emerald-600 py-3.5 font-medium text-white hover:bg-emerald-500 disabled:opacity-40"
                   >
-                    {webrtc.channelOpen ? "Send" : "Connecting\u2026"}
+                    {webrtc.channelOpen ? "Send" : "Connecting..."}
                   </button>
                 )
               )}
 
               {transfer.phase === "awaiting-accept" && (
-                <p className="text-center text-sm text-slate-500">Waiting for receiver to accept\u2026</p>
+                <p className="text-center text-sm text-slate-500">Waiting for receiver to accept...</p>
               )}
             </>
           )}
