@@ -30,7 +30,8 @@ export function SendPage() {
       else s.emit("signal:ice-candidate", { candidate: payload as RTCIceCandidateInit });
     },
     onChannelOpen: () => {
-      /* ready for transfer */
+      setStatus("paired");
+      setError(null);
     },
     onChannelMessage: (data) => transfer.handleMessage(data),
     onLocalCheckFailed: () => {
@@ -66,7 +67,9 @@ export function SendPage() {
     const onPeerJoined = (p: { peerName: string }) => {
       setPeerName(p.peerName);
       setStatus("paired");
-      void webrtc.createOffer();
+      window.setTimeout(() => {
+        void webrtc.createOffer();
+      }, 400);
     };
     const onPeerLeft = () => {
       setPeerName(null);
@@ -132,7 +135,7 @@ export function SendPage() {
     <div className="mx-auto max-w-md px-4 py-6">
       <div className="mb-6 flex items-center justify-between">
         <Link to="/" className="text-sm text-slate-500 hover:text-slate-900 dark:hover:text-white">
-          ← Home
+          \u2190 Home
         </Link>
         <span className="text-xs text-slate-500">Send</span>
       </div>
@@ -157,7 +160,7 @@ export function SendPage() {
       )}
 
       {status === "creating" && (
-        <p className="mt-8 text-center text-slate-500">Creating room…</p>
+        <p className="mt-8 text-center text-slate-500">Creating room\u2026</p>
       )}
 
       {(status === "waiting" || status === "paired" || status === "done") && pairingCode && (
@@ -169,15 +172,29 @@ export function SendPage() {
                 <QRPairing code={pairingCode} />
               </div>
               <p className="mt-4 text-center text-sm text-slate-500 animate-pulse">
-                Waiting for receiver…
+                Waiting for receiver\u2026
               </p>
             </div>
           )}
 
           {status === "paired" && peerName && (
-            <div className="rounded-2xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-center">
-              <p className="text-sm font-medium text-emerald-800 dark:text-emerald-200">
-                Connected to {peerName}
+            <div
+              className={`rounded-2xl border px-4 py-3 text-center ${
+                webrtc.channelOpen
+                  ? "border-emerald-500/30 bg-emerald-500/10"
+                  : "border-amber-500/30 bg-amber-500/10"
+              }`}
+            >
+              <p
+                className={`text-sm font-medium ${
+                  webrtc.channelOpen
+                    ? "text-emerald-800 dark:text-emerald-200"
+                    : "text-amber-800 dark:text-amber-200"
+                }`}
+              >
+                {webrtc.channelOpen
+                  ? `Ready \u2014 linked to ${peerName}`
+                  : `Pairing with ${peerName}\u2026`}
               </p>
             </div>
           )}
@@ -195,7 +212,7 @@ export function SendPage() {
                   bytesDone={transfer.bytesDone}
                   bytesTotal={transfer.bytesTotal}
                   speed={transfer.speed}
-                  label="Sending…"
+                  label="Sending\u2026"
                 />
               )}
 
@@ -220,15 +237,16 @@ export function SendPage() {
                   <button
                     type="button"
                     onClick={() => transfer.startSend()}
-                    className="w-full rounded-2xl bg-emerald-600 py-3.5 font-medium text-white hover:bg-emerald-500"
+                    disabled={!webrtc.channelOpen}
+                    className="w-full rounded-2xl bg-emerald-600 py-3.5 font-medium text-white hover:bg-emerald-500 disabled:opacity-40"
                   >
-                    Send
+                    {webrtc.channelOpen ? "Send" : "Connecting\u2026"}
                   </button>
                 )
               )}
 
               {transfer.phase === "awaiting-accept" && (
-                <p className="text-center text-sm text-slate-500">Waiting for receiver to accept…</p>
+                <p className="text-center text-sm text-slate-500">Waiting for receiver to accept\u2026</p>
               )}
             </>
           )}
