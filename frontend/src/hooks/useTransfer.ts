@@ -2,6 +2,7 @@ import { useState, useCallback, useRef } from "react";
 import type { FileMeta, QueuedFile, ProtocolMessage, TransferOffer } from "../types/transfer";
 import { MAX_FILE_SIZE } from "../types/transfer";
 import { chunkFile, waitForBuffer, CHUNK_SIZE } from "../lib/webrtc";
+import { downloadBlob, shareBlob, blobsToZip } from "../lib/download";
 
 function randomId(): string {
   const arr = new Uint8Array(8);
@@ -30,6 +31,7 @@ export function useTransfer(options: UseTransferOptions) {
   const incomingRef = useRef<
     Map<string, { meta: FileMeta; chunks: Map<number, ArrayBuffer>; received: number; totalChunks: number }>
   >(new Map());
+  const blobsRef = useRef<Map<string, Blob>>(new Map());
   const startTimeRef = useRef(0);
   const optionsRef = useRef(options);
   optionsRef.current = options;
@@ -79,13 +81,19 @@ export function useTransfer(options: UseTransferOptions) {
   }, []);
 
   const clearQueue = useCallback(() => {
-    setQueue([]);
+    setQueue((prev) => {
+      for (const f of prev) {
+        if (f.blobUrl) URL.revokeObjectURL(f.blobUrl);
+      }
+      return [];
+    });
     setOffer(null);
     setPhase("idle");
     setBytesTotal(0);
     setBytesDone(0);
     setSpeed(0);
     incomingRef.current.clear();
+    blobsRef.current.clear();
   }, []);
 
   const sendJson = useCallback((msg: ProtocolMessage): boolean => {
@@ -324,16 +332,15 @@ export function useTransfer(options: UseTransferOptions) {
           }
           ordered.push(c);
         }
-        const blob = new Blob(ordered, { type: buf.meta.type });
+        const blob = new Blob(ordered, { type: buf.meta.type || "application/octet-stream" });
+        blobsRef.current.set(msg.fileId, blob);
         const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = buf.meta.name;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        setTimeout(() => URL.revokeObjectURL(url), 10_000);
-        updateFile(msg.fileId, { status: "completed", progress: 100, bytesDone: buf.meta.size });
+        updateFile(msg.fileId, {
+          status: "completed",
+          progress: 100,
+          bytesDone: buf.meta.size,
+          blobUrl: url,
+        });
         incomingRef.current.delete(msg.fileId);
       } else if (msg.type === "transfer-complete") {
         setPhase("completed");
@@ -350,6 +357,43 @@ export function useTransfer(options: UseTransferOptions) {
     [runSend, updateFile]
   );
 
+  const downloadFile = useCallback(
+    (id: string) => {
+      const blob = blobsRef.current.get(id);
+      const item = queue.find((f) => f.id === id);
+      if (!blob || !item) return;
+      downloadBlob(blob, item.name);
+    },
+    [queue]
+  );
+
+  const shareFile = useCallback(
+    async (id: string) => {
+      const blob = blobsRef.current.get(id);
+      const item = queue.find((f) => f.id === id);
+      if (!blob || !item) return;
+      await shareBlob(blob, item.name);
+    },
+    [queue]
+  );
+
+  const downloadAllZip = useCallback(async () => {
+    const items = queue.filter(
+      (f) => f.status === "completed" && f.direction === "receive" && blobsRef.current.has(f.id)
+    );
+    if (items.length === 0) return;
+    if (items.length === 1) {
+      downloadFile(items[0].id);
+      return;
+    }
+    const files = items.map((f) => ({
+      name: f.name,
+      blob: blobsRef.current.get(f.id)!,
+    }));
+    const zipBlob = await blobsToZip(files);
+    downloadBlob(zipBlob, `localdrop-${Date.now()}.zip`);
+  }, [queue, downloadFile]);
+
   return {
     queue,
     offer,
@@ -365,5 +409,8 @@ export function useTransfer(options: UseTransferOptions) {
     rejectOffer,
     cancel,
     handleMessage,
+    downloadFile,
+    shareFile,
+    downloadAllZip,
   };
 }
