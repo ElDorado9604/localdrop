@@ -25,17 +25,21 @@ export function useWebRTC(options: UseWebRTCOptions) {
   const optionsRef = useRef(options);
   optionsRef.current = options;
   const [pcState, setPcState] = useState<RTCPeerConnectionState>("new");
+  const [channelOpen, setChannelOpen] = useState(false);
   const pendingIce = useRef<RTCIceCandidateInit[]>([]);
   const remoteSet = useRef(false);
+  const makingOffer = useRef(false);
 
   const wireChannel = useCallback((channel: RTCDataChannel) => {
     channel.binaryType = "arraybuffer";
     channelRef.current = channel;
 
     channel.onopen = () => {
+      setChannelOpen(true);
       optionsRef.current.onChannelOpen?.(channel);
     };
     channel.onclose = () => {
+      setChannelOpen(false);
       optionsRef.current.onChannelClose?.();
     };
     channel.onerror = () => {
@@ -44,6 +48,11 @@ export function useWebRTC(options: UseWebRTCOptions) {
     channel.onmessage = (event) => {
       optionsRef.current.onChannelMessage?.(event.data);
     };
+
+    if (channel.readyState === "open") {
+      setChannelOpen(true);
+      optionsRef.current.onChannelOpen?.(channel);
+    }
   }, []);
 
   const ensurePc = useCallback(
@@ -65,7 +74,7 @@ export function useWebRTC(options: UseWebRTCOptions) {
           }
           if (state === "failed") {
             optionsRef.current.onConnectionFailed?.(
-              "Local connection could not be established. Confirm that both devices are connected to the same Wi-Fi network or hotspot, then try again."
+              "Could not establish a direct link. Put both devices on the same Wi\u2011Fi or hotspot and try again."
             );
           }
         }
@@ -87,15 +96,53 @@ export function useWebRTC(options: UseWebRTCOptions) {
   );
 
   const createOffer = useCallback(async () => {
-    const pc = ensurePc(true);
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-    optionsRef.current.sendSignal("offer", offer);
+    if (makingOffer.current) return;
+    makingOffer.current = true;
+    try {
+      const pc = ensurePc(true);
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      optionsRef.current.sendSignal("offer", offer);
+    } catch (e) {
+      optionsRef.current.onConnectionFailed?.(
+        e instanceof Error ? e.message : "Failed to create connection offer"
+      );
+    } finally {
+      makingOffer.current = false;
+    }
   }, [ensurePc]);
 
   const handleOffer = useCallback(
     async (sdp: RTCSessionDescriptionInit) => {
-      const pc = ensurePc(false);
+      try {
+        const pc = ensurePc(false);
+        await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+        remoteSet.current = true;
+        for (const c of pendingIce.current) {
+          try {
+            await pc.addIceCandidate(new RTCIceCandidate(c));
+          } catch {
+            /* ignore */
+          }
+        }
+        pendingIce.current = [];
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        optionsRef.current.sendSignal("answer", answer);
+      } catch (e) {
+        optionsRef.current.onConnectionFailed?.(
+          e instanceof Error ? e.message : "Failed to handle offer"
+        );
+      }
+    },
+    [ensurePc]
+  );
+
+  const handleAnswer = useCallback(async (sdp: RTCSessionDescriptionInit) => {
+    const pc = pcRef.current;
+    if (!pc) return;
+    try {
+      if (pc.signalingState === "stable") return;
       await pc.setRemoteDescription(new RTCSessionDescription(sdp));
       remoteSet.current = true;
       for (const c of pendingIce.current) {
@@ -106,29 +153,20 @@ export function useWebRTC(options: UseWebRTCOptions) {
         }
       }
       pendingIce.current = [];
-      const answer = await pc.createAnswer();
-      await pc.setLocalDescription(answer);
-      optionsRef.current.sendSignal("answer", answer);
-    },
-    [ensurePc]
-  );
-
-  const handleAnswer = useCallback(async (sdp: RTCSessionDescriptionInit) => {
-    const pc = pcRef.current;
-    if (!pc) return;
-    await pc.setRemoteDescription(new RTCSessionDescription(sdp));
-    remoteSet.current = true;
-    for (const c of pendingIce.current) {
-      try {
-        await pc.addIceCandidate(new RTCIceCandidate(c));
-      } catch {
-        /* ignore */
-      }
+    } catch (e) {
+      optionsRef.current.onConnectionFailed?.(
+        e instanceof Error ? e.message : "Failed to handle answer"
+      );
     }
-    pendingIce.current = [];
   }, []);
 
   const handleIce = useCallback(async (candidate: RTCIceCandidateInit) => {
+    if (
+      !candidate ||
+      (!candidate.candidate && !candidate.sdpMid && candidate.sdpMLineIndex == null)
+    ) {
+      return;
+    }
     const pc = pcRef.current;
     if (!pc || !remoteSet.current) {
       pendingIce.current.push(candidate);
@@ -150,11 +188,14 @@ export function useWebRTC(options: UseWebRTCOptions) {
     pcRef.current = null;
     pendingIce.current = [];
     remoteSet.current = false;
+    makingOffer.current = false;
+    setChannelOpen(false);
     setPcState("closed");
   }, []);
 
   return {
     pcState,
+    channelOpen,
     createOffer,
     handleOffer,
     handleAnswer,
