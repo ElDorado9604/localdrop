@@ -80,6 +80,54 @@ export class RoomManager {
     return { room };
   }
 
+  /**
+   * Reconnect a socket into a room it was previously part of (e.g. after an
+   * iOS screen lock killed the connection). Only allowed when the room still
+   * exists, the reconnecting role's slot is currently empty, and the other
+   * side is still present — otherwise the caller should start a fresh
+   * transfer instead.
+   */
+  rejoinRoom(
+    pairingCode: string,
+    socketId: string,
+    role: "sender" | "receiver",
+    name: string
+  ): { room: TransferRoom } | { error: string; code?: string } {
+    const code = pairingCode.replace(/\D/g, "").padStart(6, "0").slice(-6);
+    const roomId = this.codeToRoomId.get(code);
+    if (!roomId) {
+      return { error: "This session has ended. Start a new transfer.", code: "NOT_FOUND" };
+    }
+    const room = this.rooms.get(roomId);
+    if (!room) {
+      return { error: "This session has ended. Start a new transfer.", code: "GONE" };
+    }
+
+    if (role === "sender") {
+      if (room.senderSocketId) {
+        return { error: "Already connected in another tab.", code: "BUSY" };
+      }
+      if (!room.receiverSocketId) {
+        return { error: "The other device is no longer connected.", code: "PEER_GONE" };
+      }
+      room.senderSocketId = socketId;
+      if (name) room.senderName = name;
+    } else {
+      if (room.receiverSocketId) {
+        return { error: "Already connected in another tab.", code: "BUSY" };
+      }
+      if (!room.senderSocketId) {
+        return { error: "The other device is no longer connected.", code: "PEER_GONE" };
+      }
+      room.receiverSocketId = socketId;
+      if (name) room.receiverName = name;
+    }
+
+    this.socketToRoom.set(socketId, roomId);
+    room.expiresAt = Date.now() + 30 * 60 * 1000;
+    return { room };
+  }
+
   getRoom(roomId: string): TransferRoom | undefined {
     return this.rooms.get(roomId);
   }
