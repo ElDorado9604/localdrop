@@ -19,10 +19,12 @@ export function SendPage() {
   const [pairingCode, setPairingCode] = useState<string | null>(null);
   const [peerName, setPeerName] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [canRetry, setCanRetry] = useState(false);
+  const [retrying, setRetrying] = useState(false);
   const [status, setStatus] = useState<"idle" | "creating" | "waiting" | "paired" | "done">("idle");
   const deviceNameRef = useRef(resolveDeviceName());
-  const statusRef = useRef(status);
-  statusRef.current = status;
+  const pairingCodeRef = useRef<string | null>(null);
+  const resumeAfterOfferRef = useRef(false);
 
   const webrtc = useWebRTC({
     sendSignal: (type, payload) => {
@@ -34,27 +36,27 @@ export function SendPage() {
     onChannelOpen: () => {
       setStatus("paired");
       setError(null);
+      setCanRetry(false);
+      setRetrying(false);
+      if (resumeAfterOfferRef.current) {
+        resumeAfterOfferRef.current = false;
+        transfer.resumeSend();
+      }
     },
     onChannelMessage: (data) => transfer.handleMessage(data),
     onLocalCheckFailed: () => {
-      if (statusRef.current === "done") return;
       setError(
         "Local connection could not be established. Confirm that both devices are connected to the same Wi-Fi network or hotspot, then try again."
       );
     },
-    onConnectionFailed: (reason) => {
-      if (statusRef.current === "done") return;
-      setError(reason);
-    },
+    onConnectionFailed: (reason) => setError(reason),
   });
 
   const transfer = useTransfer({
     getChannel: webrtc.getChannel,
     deviceName: deviceNameRef.current,
     onComplete: () => {
-      webrtc.markCompleted();
       setStatus("done");
-      setError(null);
       getSocket().emit("room:complete");
     },
     onCancelled: () => {
@@ -80,10 +82,16 @@ export function SendPage() {
       }, 400);
     };
     const onPeerLeft = () => {
-      if (statusRef.current === "done") return;
       setPeerName(null);
       setError("The other device disconnected.");
-      setStatus((st) => (st === "waiting" ? "waiting" : "idle"));
+      webrtc.close();
+      // A peer-left event only ever fires here once a receiver had actually
+      // joined, so the room (and pairing code) is still alive server-side.
+      // Keep the file list / progress UI on screen (status unchanged) rather
+      // than falling back to the "Create room" idle screen while retryable.
+      const retryable = !!pairingCodeRef.current;
+      setCanRetry(retryable);
+      if (!retryable) setStatus((st) => (st === "waiting" ? "waiting" : "idle"));
     };
     const onCancelled = () => {
       setError("Transfer cancelled. No files were stored by this app.");
@@ -126,8 +134,36 @@ export function SendPage() {
         return;
       }
       setPairingCode(res.pairingCode);
+      pairingCodeRef.current = res.pairingCode;
       setStatus("waiting");
     });
+  }, []);
+
+  const retry = useCallback(() => {
+    const code = pairingCodeRef.current;
+    if (!code) return;
+    setRetrying(true);
+    setError(null);
+    const s = getSocket();
+    if (!s.connected) s.connect();
+    s.emit(
+      "room:rejoin",
+      { pairingCode: code, role: "sender", deviceName: deviceNameRef.current },
+      (res) => {
+        if ("error" in res) {
+          setRetrying(false);
+          setError(res.error);
+          return;
+        }
+        setPeerName(res.peerName || "Receiver");
+        setStatus("paired");
+        resumeAfterOfferRef.current = true;
+        window.setTimeout(() => {
+          void webrtc.createOffer();
+        }, 400);
+      }
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const cancel = () => {
@@ -144,7 +180,7 @@ export function SendPage() {
     <div className="mx-auto max-w-md px-4 py-6">
       <div className="mb-6 flex items-center justify-between">
         <Link to="/" className="text-sm text-slate-500 hover:text-slate-900 dark:hover:text-white">
-          {'\u2190'} Home
+          \u2190 Home
         </Link>
         <span className="text-xs text-slate-500">Send</span>
       </div>
@@ -153,8 +189,18 @@ export function SendPage() {
       <p className="mt-1 text-sm text-slate-500">Create a room, then let the other device join.</p>
 
       {error && (
-        <div className="mt-4">
+        <div className="mt-4 space-y-2">
           <ErrorMessage message={error} onDismiss={() => setError(null)} />
+          {canRetry && (
+            <button
+              type="button"
+              onClick={retry}
+              disabled={retrying}
+              className="w-full rounded-xl bg-sky-600 py-2.5 text-sm font-medium text-white hover:bg-sky-500 disabled:opacity-50"
+            >
+              {retrying ? "Reconnecting\u2026" : "Retry connection"}
+            </button>
+          )}
         </div>
       )}
 
@@ -169,7 +215,7 @@ export function SendPage() {
       )}
 
       {status === "creating" && (
-        <p className="mt-8 text-center text-slate-500">Creating room...</p>
+        <p className="mt-8 text-center text-slate-500">Creating room\u2026</p>
       )}
 
       {(status === "waiting" || status === "paired" || status === "done") && pairingCode && (
@@ -181,7 +227,7 @@ export function SendPage() {
                 <QRPairing code={pairingCode} />
               </div>
               <p className="mt-4 text-center text-sm text-slate-500 animate-pulse">
-                Waiting for receiver...
+                Waiting for receiver\u2026
               </p>
             </div>
           )}
@@ -202,8 +248,8 @@ export function SendPage() {
                 }`}
               >
                 {webrtc.channelOpen
-                  ? `Ready - linked to ${peerName}`
-                  : `Pairing with ${peerName}...`}
+                  ? `Ready \u2014 linked to ${peerName}`
+                  : `Pairing with ${peerName}\u2026`}
               </p>
             </div>
           )}
@@ -221,7 +267,7 @@ export function SendPage() {
                   bytesDone={transfer.bytesDone}
                   bytesTotal={transfer.bytesTotal}
                   speed={transfer.speed}
-                  label="Sending..."
+                  label="Sending\u2026"
                 />
               )}
 
@@ -249,13 +295,13 @@ export function SendPage() {
                     disabled={!webrtc.channelOpen}
                     className="w-full rounded-2xl bg-emerald-600 py-3.5 font-medium text-white hover:bg-emerald-500 disabled:opacity-40"
                   >
-                    {webrtc.channelOpen ? "Send" : "Connecting..."}
+                    {webrtc.channelOpen ? "Send" : "Connecting\u2026"}
                   </button>
                 )
               )}
 
               {transfer.phase === "awaiting-accept" && (
-                <p className="text-center text-sm text-slate-500">Waiting for receiver to accept...</p>
+                <p className="text-center text-sm text-slate-500">Waiting for receiver to accept\u2026</p>
               )}
             </>
           )}
